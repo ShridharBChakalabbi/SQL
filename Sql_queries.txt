@@ -1,0 +1,232 @@
+﻿The first thing we need to do is de-normalize the tables. 
+Analytics don't work well on normalised tables. 
+So the first result set we create is to map payments against the last most call. 
+It is very difficult for determining whether a payment is 
+because of the first call or second call. 
+As a first we link the last call with the payments. 
+In order to do that we run the following query.
+
+SELECT
+p.`loan_number` AS 'loan_number',
+p.`transaction_effective_date` AS 'transaction_effective_date',
+p.`transaction_code` AS 'transaction_code',
+p.`transaction_amount` AS 'transaction_amount',
+MAX(c.`date`) AS 'most_recent_call_date'
+FROM
+payment p
+LEFT OUTER JOIN
+autodialer c
+ON p.`loan_number` = c.`AccountNumber`
+WHERE
+    c.`date` <= p.`transaction_effective_date`
+GROUP BY
+p.`loan_number`,
+p.`transaction_effective_date`,
+p.`transaction_code`,
+p.`transaction_amount`;
+
+Now this table has a direct payment to last call relationship. However that may not be good enough (though that is what you mentioned as your requirement). We need to add the details of the amount due also and approach it call wise (because we need call-wise efficacy). For that we modify the above query to become a part of a subquery in the following manner.
+
+SELECT
+
+pmt.*, c2.`Amount Due` AS 'AmountDue'
+FROM
+autodialer c2
+LEFT OUTER JOIN
+(SELECT
+p.`loan_number` AS 'loan_number',
+p.`transaction_effective_date` AS 'transaction_effective_date',
+p.`transaction_code` AS 'transaction_code',
+p.`transaction_amount` AS 'transaction_amount',
+MAX(c.`date`) AS 'most_recent_call_date'
+FROM
+payment p
+LEFT OUTER JOIN
+autodialer c
+ON p.`loan_number` = c.`AccountNumber`
+WHERE
+c.`date` <= p.`transaction_effective_date`
+GROUP BY
+p.`loan_number`,
+p.`transaction_effective_date`,
+p.`transaction_code`,
+p.`transaction_amount`
+) pmt
+ON c2.`AccountNumber` = pmt.`AccountNumber`
+AND c2.`date` = pmt.`most_recent_call_date`;
+
+Now we have a table/or result set with the following columns
+
+loan_number, transaction_effective_date, transaction_code, transaction_amount, most_recent_call_date, AmountDue
+ 
+ It is important to note here that all calls in the autodialer will have an entry. There may be multiple entries also based on number of payments and tranches.
+This can be the basis of all your queries. If you need this structure to directly run future queries in real time you may want to create a view. A second level of nesting will also work. Let's assume the below is a view called base_data.
+
+CREATE VIEW base_date AS
+SELECT
+pmt.*,
+c2.`Amount Due` AS 'AmountDue'
+FROM
+autodialer c2
+FULL OUTER JOIN
+(SELECT
+p.`loan_number` AS 'loan_number',
+p.`transaction_effective_date` AS 'transaction_effective_date',
+p.`transaction_code` AS 'transaction_code',
+p.`transaction_amount` AS 'transaction_amount',
+MAX(c.`date`) AS 'most_recent_call_date'
+FROM
+payment p
+LEFT OUTER JOIN
+autodialer c
+ON p.`loan_number` = c.`AccountNumber`
+WHERE
+    c.`date` <= p.`transaction_effective_date`
+GROUP BY
+p.`loan_number`,
+p.`transaction_effective_date`,
+p.`transaction_code`,
+p.`transaction_amount`
+) pmt
+ON c2.`AccountNumber` = pmt.`AccountNumber`
+AND c2.`date` = pmt.`most_recent_call_date`;
+
+Now lets assume some use cases…
+
+Call Value: The number of outstanding reduced by payments. If it is fully reduced the call was great.
+SELECT
+`loan_number` AS 'Loan Number',
+`most_recent_call_date` AS 'Most Recent Call',
+COUNT(*) AS 'Tranches',
+SUM(`transaction_amount`) As 'Total Payment Received',
+SUM(`transaction_amount`) / `AmountDue` * 100 AS 'Efficacy'
+FROM
+base_data
+GROUP BY
+`loan_number`,
+`most_recent_call_date`
+ORDER BY
+`most_recent_call_date`;
+
+Call Value (Filters): Same as above but you can get filters using HAVING clause. For example all calls having 100% efficacy.
+SELECT
+`loan_number` AS 'Loan Number',
+`most_recent_call_date` AS 'Most Recent Call',
+COUNT(*) AS 'Tranches',
+SUM(`transaction_amount`) As 'Total Payment Received',
+SUM(`transaction_amount`) / `AmountDue` * 100 AS 'Efficacy'
+FROM
+base_data
+GROUP BY
+`loan_number`,
+`most_recent_call_date`
+HAVING
+(SUM(`transaction_amount`) / `AmountDue` * 100) = 100
+ORDER BY
+`most_recent_call_date`;
+
+Call Value (Aggregates): Same as above but you can use aggregates. For example average call Efficacy. We need to nest again. Don't be afraid of nesting. :-)
+SELECT
+AVG(`Efficacy`) AS 'Average Call Efficacy'
+FROM
+(SELECT
+`loan_number` AS 'Loan Number',
+`most_recent_call_date` AS 'Most Recent Call',
+COUNT(*) AS 'Tranches',
+SUM(`transaction_amount`) As 'Total Payment Received',
+SUM(`transaction_amount`) / `AmountDue` * 100 AS 'Efficacy'
+FROM
+base_data
+GROUP BY
+`loan_number`,
+`most_recent_call_date`
+HAVING
+(SUM(`transaction_amount`) / `AmountDue` * 100) = 100
+ORDER BY
+`most_recent_call_date`
+) t;
+
+Call Value (Aggregates With Filters): Same as above. But may be per Customer Call Efficacy
+SELECT
+`loan_number` As 'Loan Number'
+AVG(`Efficacy`) AS 'Average Call Efficacy'
+FROM
+(SELECT
+`loan_number` AS 'Loan Number',
+`most_recent_call_date` AS 'Most Recent Call',
+COUNT(*) AS 'Tranches',
+SUM(`transaction_amount`) As 'Total Payment Received',
+SUM(`transaction_amount`) / `AmountDue` * 100 AS 'Efficacy'
+FROM
+base_data
+GROUP BY
+`loan_number`,
+`most_recent_call_date`
+HAVING
+(SUM(`transaction_amount`) / `AmountDue` * 100) = 100
+ORDER BY
+`most_recent_call_date`
+) t;
+GROUP BY
+`loan_number`;
+
+Call Value (Aggregates With Filters And Classifications): Same as above. But only non-responsive customers. Maybe they need to be beaten up :-)
+SELECT
+`loan_number` As 'Loan Number'
+AVG(`Efficacy`) AS 'Average Call Efficacy'
+FROM
+(SELECT
+`loan_number` AS 'Loan Number',
+`most_recent_call_date` AS 'Most Recent Call',
+COUNT(*) AS 'Tranches',
+SUM(`transaction_amount`) As 'Total Payment Received',
+SUM(`transaction_amount`) / `AmountDue` * 100 AS 'Efficacy'
+FROM
+base_data
+GROUP BY
+`loan_number`,
+`most_recent_call_date`
+HAVING
+(SUM(`transaction_amount`) / `AmountDue` * 100) = 100
+ORDER BY
+`most_recent_call_date`
+) t;
+GROUP BY
+`loan_number`
+HAVING
+AVG(`Efficacy`) < 10;
+
+Payment Patterns: Delay between call and payments
+SELECT
+`loan_number` As 'Loan Number'
+AVG(`transaction_effective_date` - `most_recent_call_date`) AS 'Average Payment Latency'
+FROM
+base_data
+GROUP BY
+`loan_number`;
+HAVING
+AVG(`transaction_effective_date` - `most_recent_call_date`) > 3;
+
+You could also modify the first query itself (for creating the base_data view) to incorporate latencies like below. Now you can use the field `Latency` for your calculations also.
+SELECT
+`loan_number` AS 'Loan Number',
+`most_recent_call_date` AS 'Most Recent Call',
+COUNT(*) AS 'Tranches',
+SUM(`transaction_amount`) As 'Total Payment Received',
+SUM(`transaction_amount`) / `AmountDue` * 100 AS 'Efficacy',
+DATEDIFF(`transaction_effective_date`, `most_recent_call_date`) AS 'Latency'
+FROM
+base_data
+GROUP BY
+`loan_number`,
+`most_recent_call_date`
+ORDER BY
+`most_recent_call_date`;
+
+Some observations and suggestions.
+Once you have this type of table or view or result set you can have a plethora of queries for various kinds of analysis. I dont think its practically possible to cover all of them.
+You would need to have indexes on loan_number (typically a hash index) and date and transaction_effective_date (typically btree indexes).
+I have not tested the above for syntax but should work overall.
+In case there has been a payment before even a single call there may be an error in division by AmountDue. In such cases either use an IFNULL or remove such entries by replacing the 'FULL OUTER JOIN' with 'LEFT OUTER JOIN'.
+Never name a column as date !
+
